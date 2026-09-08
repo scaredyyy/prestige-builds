@@ -1,0 +1,36 @@
+{
+  "required": true,
+  "package": "dev.zprestige.prestige.api.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "client": [
+    "IHandledScreen",
+    "IKeyBinding",
+    "IMinecraftClient",
+    "IWorld",
+    "IWorldRenderer",
+    "MixinKeyboard",
+    "MixinPojavMouse",
+    "MixinInGameHud",
+    "MixinClientConnection",
+    "MixinClientPlayNetworkHandler",
+    "MixinClientWorld",
+    "MixinClientPlayerEntity",
+    "MixinCamera",
+    "MixinEntity",
+    "MixinScreen",
+    "MixinParticleManager",
+    "MixinInGameOverlayRenderer"
+    ,"MixinEntityRenderDispatcher"
+    ,"MixinLightmapTextureManager"
+    ,"MixinPlayerEntity"
+    ,"MixinTextVisitFactory"
+    ,"MixinItemStack"
+    ,"MixinWorldRenderer"
+    ,"MixinHeldItemRenderer"
+    ,"MixinPojavGameRenderer"
+  ],
+  "injectors": {
+    "defaultRequire": 0
+  },
+  "refmap": "new-refmap.json"
+}

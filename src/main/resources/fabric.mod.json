@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "id": "prestige",
+  "name": "",
+  "version": "0.3.0-pojav-combat",
+  "environment": "*",
+  "entrypoints": {
+    "main": [
+      "dev.zprestige.prestige.client.Prestige"
+    ]
+  },
+  "mixins": [
+    "prestige.pojav.mixins.json"
+  ],
+  "depends": {
+    "fabricloader": ">=0.14.14",
+    "fabric-api": "*",
+    "minecraft": "~1.21",
+    "java": ">=21"
+  }
+}
