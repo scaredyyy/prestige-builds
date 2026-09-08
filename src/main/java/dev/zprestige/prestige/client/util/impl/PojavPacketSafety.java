@@ -17,6 +17,7 @@ public final class PojavPacketSafety {
     private PojavPacketSafety() { }
 
     public static synchronized boolean allow(Packet<?> packet) {
+        if (!PacketStateValidator.canSend(packet)) return false;
         if (!PojavInput.isPojav()) return true;
         if (packet instanceof PlayerInteractBlockC2SPacket && TRUSTED_BLOCK_ACTION.get() > 0) return true;
 
