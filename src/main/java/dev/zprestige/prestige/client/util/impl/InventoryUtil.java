@@ -4,86 +4,89 @@ import dev.zprestige.prestige.client.util.MC;
 import net.minecraft.block.Block;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.screen.ingame.InventoryScreen;
-import net.minecraft.entity.effect.StatusEffect;
-import net.minecraft.entity.effect.StatusEffectInstance;
-import net.minecraft.registry.entry.RegistryEntry;
 import net.minecraft.component.DataComponentTypes;
 import net.minecraft.component.type.PotionContentsComponent;
+import net.minecraft.entity.effect.StatusEffect;
+import net.minecraft.entity.effect.StatusEffectInstance;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
-import net.minecraft.screen.PlayerScreenHandler;
+import net.minecraft.registry.entry.RegistryEntry;
 import net.minecraft.screen.slot.SlotActionType;
 
 import java.util.ArrayList;
 
 public class InventoryUtil implements MC {
-
     public static InventoryUtil INSTANCE = new InventoryUtil();
 
-    public ArrayList<Integer> findItemSlot(Item item, boolean bl) {
-        ArrayList<Integer> arrayList = new ArrayList<>();
-        for (int i = bl ? 0 : 9; i < 36; i++) {
-            if (getMc().player.getInventory().getStack(i).getItem() == item) {
-                arrayList.add(i);
-            }
+    public ArrayList<Integer> findItemSlot(Item item, boolean includeHotbar) {
+        ArrayList<Integer> slots = new ArrayList<>();
+        if (getMc().player == null || item == null) return slots;
+
+        int startSlot = includeHotbar ? 0 : 9;
+        for (int slot = startSlot; slot < 36; slot++) {
+            if (getMc().player.getInventory().getStack(slot).getItem() == item) slots.add(slot);
         }
-        return arrayList;
+        return slots;
     }
 
-    public void setCurrentSlot(int n) {
-        getMc().player.getInventory().selectedSlot = n;
+    public void setCurrentSlot(int slot) {
+        if (getMc().player == null || slot < 0 || slot > 8) return;
+        if (getMc().player.getInventory().selectedSlot == slot) return;
+        getMc().player.getInventory().selectedSlot = slot;
     }
 
     public boolean isHoldingItem(Item item) {
-        return getMc().player.getMainHandStack().getItem() == item;
+        return getMc().player != null && item != null && getMc().player.getMainHandStack().getItem() == item;
     }
 
     public Integer findBlockSlot(Block block) {
-        for (int i = 0; i < 9; i++) {
-            if (getMc().player.getInventory().getStack(i).getItem() == block.asItem()) {
-                return i;
-            }
+        if (getMc().player == null || block == null) return null;
+        for (int slot = 0; slot < 9; slot++) {
+            if (getMc().player.getInventory().getStack(slot).getItem() == block.asItem()) return slot;
         }
         return null;
     }
 
-    public Integer findPotion(int n, int n2, RegistryEntry<StatusEffect> statusEffect) {
-        for (int i = n; i < n2; i++) {
-            ItemStack itemStack = getMc().player.getInventory().getStack(i);
-            if (itemStack.getItem() == Items.SPLASH_POTION && (statusEffect == null || hasStatusEffect(itemStack, statusEffect))) {
-                return i;
-            }
+    public Integer findPotion(int startSlot, int endSlot, RegistryEntry<StatusEffect> statusEffect) {
+        if (getMc().player == null) return null;
+        int start = Math.max(0, startSlot);
+        int end = Math.min(36, endSlot);
+        if (start >= end) return null;
+
+        for (int slot = start; slot < end; slot++) {
+            ItemStack stack = getMc().player.getInventory().getStack(slot);
+            if (stack.getItem() == Items.SPLASH_POTION && (statusEffect == null || hasStatusEffect(stack, statusEffect))) return slot;
         }
         return null;
     }
 
     public boolean hasStatusEffect(ItemStack itemStack, RegistryEntry<StatusEffect> statusEffect) {
-        for (StatusEffectInstance statusEffectInstance : itemStack.getOrDefault(DataComponentTypes.POTION_CONTENTS, PotionContentsComponent.DEFAULT).getEffects()) {
-            if (statusEffectInstance.getEffectType().equals(statusEffect)) {
-                return true;
-            }
+        if (itemStack == null || statusEffect == null) return false;
+        PotionContentsComponent contents = itemStack.getOrDefault(DataComponentTypes.POTION_CONTENTS, PotionContentsComponent.DEFAULT);
+        for (StatusEffectInstance effect : contents.getEffects()) {
+            if (effect.getEffectType().equals(statusEffect)) return true;
         }
         return false;
     }
 
-    public boolean performSlotAction(int n, int n2, SlotActionType slotActionType) {
-        if (getMc().currentScreen instanceof InventoryScreen screen) {
-            getMc().interactionManager.clickSlot(screen.getScreenHandler().syncId, n, n2, slotActionType, getMc().player);
-            return true;
-        }
+    public boolean performSlotAction(int slot, int button, SlotActionType actionType) {
+        if (getMc().player == null || getMc().interactionManager == null || actionType == null) return false;
+        if (!(getMc().currentScreen instanceof InventoryScreen screen)) return false;
+        if (slot < 0 || slot >= screen.getScreenHandler().slots.size()) return false;
+
+        getMc().interactionManager.clickSlot(screen.getScreenHandler().syncId, slot, button, actionType, getMc().player);
         return true;
     }
 
     public boolean isHoldingOffhandItem(Item item) {
-        return getMc().player.getOffHandStack().getItem() == item;
+        return getMc().player != null && item != null && getMc().player.getOffHandStack().getItem() == item;
     }
 
     public Integer findItemInHotbar(Item item) {
-        for (int i = 0; i < 9; i++) {
-            if (getMc().player.getInventory().getStack(i).getItem() == item) {
-                return i;
-            }
+        if (getMc().player == null || item == null) return null;
+        for (int slot = 0; slot < 9; slot++) {
+            if (getMc().player.getInventory().getStack(slot).getItem() == item) return slot;
         }
         return null;
     }
