@@ -10,26 +10,34 @@ import dev.zprestige.prestige.client.setting.impl.IntSetting;
 import dev.zprestige.prestige.client.util.impl.InventoryUtil;
 import dev.zprestige.prestige.client.util.impl.PojavInput;
 import dev.zprestige.prestige.client.util.impl.PojavPacketSafety;
+import dev.zprestige.prestige.client.util.impl.RandomUtil;
+import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.component.DataComponentTypes;
 import net.minecraft.item.Items;
 import net.minecraft.item.ShieldItem;
 import net.minecraft.network.packet.c2s.play.PlayerInteractBlockC2SPacket;
 import net.minecraft.state.property.Properties;
+import net.minecraft.util.ActionResult;
 import net.minecraft.util.Hand;
 import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.math.BlockPos;
 
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.Set;
 
-/** Deterministic respawn-anchor macro using normal client block interactions. */
+/** Anchor macro synchronized with the local vanilla world state. */
 public final class AnchorMacro extends Module {
     public BooleanSetting whileUse;
     public BooleanSetting stopOnKill;
     public IntSetting switchDelay;
+    public IntSetting switchChance;
+    public IntSetting placeChance;
     public IntSetting glowstoneDelay;
+    public IntSetting glowstoneChance;
     public IntSetting explodeDelay;
+    public IntSetting explodeChance;
     public IntSetting explodeSlot;
     public BooleanSetting onlyOwn;
     public BooleanSetting onlyCharge;
@@ -38,15 +46,23 @@ public final class AnchorMacro extends Module {
     private int glowstoneClock;
     private int explodeClock;
     private final Set<BlockPos> ownedAnchors = new HashSet<>();
+    private final Set<BlockPos> pendingOwnedAnchors = new HashSet<>();
     private BlockPos armedAnchor;
+    private BlockPos pendingActionPos;
+    private PendingAction pendingAction = PendingAction.NONE;
+    private int pendingCharge;
 
     public AnchorMacro() {
-        super("Anchor Macro", Category.Combat, "Deterministic respawn-anchor macro using normal interactions");
-        whileUse = setting("While Use", true).description("Allows the macro while eating or shielding.");
-        stopOnKill = setting("Stop On Kill", false).description("Reserved for the module's existing kill-stop behavior.");
+        super("Anchor Macro", Category.Combat, "Anchor macro synchronized with current vanilla block state");
+        whileUse = setting("While Use", true).description("Trigger while eating or shielding");
+        stopOnKill = setting("Stop On Kill", false).description("Do not anchor near dead players");
         switchDelay = setting("Switch Delay", 0, 0, 20);
+        switchChance = setting("Switch Chance", 100, 0, 100);
+        placeChance = setting("Place Chance", 100, 0, 100);
         glowstoneDelay = setting("Glowstone Delay", 0, 0, 20);
+        glowstoneChance = setting("Glowstone Chance", 100, 0, 100);
         explodeDelay = setting("Explode Delay", 0, 0, 20);
+        explodeChance = setting("Explode Chance", 100, 0, 100);
         explodeSlot = setting("Explode Slot", 1, 1, 9);
         onlyOwn = setting("Only Own", false);
         onlyCharge = setting("Only Charge", false);
@@ -54,116 +70,199 @@ public final class AnchorMacro extends Module {
 
     @Override
     public void onEnable() {
-        resetTimers();
-        armedAnchor = null;
+        resetClocks();
+        resetCycle();
+        pendingOwnedAnchors.clear();
     }
 
     @Override
     public void onDisable() {
-        resetTimers();
         ownedAnchors.clear();
-        armedAnchor = null;
+        pendingOwnedAnchors.clear();
+        resetCycle();
+        resetClocks();
     }
 
     @EventListener
     public void event(TickEvent event) {
-        if (!hasValidGameState()) {
-            resetActiveCycle();
+        if (!isClientReady()) {
+            resetCycle();
+            return;
+        }
+        confirmOwnedAnchors();
+        updatePendingAction();
+
+        if (!(getMc().crosshairTarget instanceof BlockHitResult hit)) {
+            resetCycle();
+            return;
+        }
+        BlockPos anchorPos = hit.getBlockPos();
+        BlockState state = getMc().world.getBlockState(anchorPos);
+        if (!state.isOf(Blocks.RESPAWN_ANCHOR)) {
+            resetCycle();
             return;
         }
 
         boolean physicalUse = isPhysicalUsePressed();
-        boolean eatingOrShielding = getMc().player.getMainHandStack().contains(DataComponentTypes.FOOD)
-                || getMc().player.getMainHandStack().getItem() instanceof ShieldItem
-                || getMc().player.getOffHandStack().contains(DataComponentTypes.FOOD)
-                || getMc().player.getOffHandStack().getItem() instanceof ShieldItem;
-
-        if (!(getMc().crosshairTarget instanceof BlockHitResult hit)
-                || getMc().world.getBlockState(hit.getBlockPos()).getBlock() != Blocks.RESPAWN_ANCHOR) {
-            resetActiveCycle();
-            return;
-        }
-        if (eatingOrShielding && physicalUse && !whileUse.getObject()) return;
-
-        if (physicalUse) armedAnchor = hit.getBlockPos().toImmutable();
-        boolean active = physicalUse || hit.getBlockPos().equals(armedAnchor);
-        if (!active) return;
+        if (!canRunWhileUsing(physicalUse)) return;
+        if (physicalUse) arm(anchorPos);
+        if (!isArmedFor(anchorPos, physicalUse)) return;
 
         getMc().options.useKey.setPressed(false);
-        if (onlyOwn.getObject() && !ownedAnchors.contains(hit.getBlockPos())) {
-            resetActiveCycle();
+        if (onlyOwn.getObject() && !ownedAnchors.contains(anchorPos)) {
+            resetCycle();
             return;
         }
+        if (isPendingAt(anchorPos)) return;
 
-        int charges = getMc().world.getBlockState(hit.getBlockPos()).get(Properties.CHARGES);
+        int charges = state.get(Properties.CHARGES);
         if (charges == 0) {
-            charge(hit);
+            charge(hit, charges);
             return;
         }
         if (onlyCharge.getObject()) {
-            resetActiveCycle();
+            resetCycle();
             return;
         }
-        explode(hit);
+        explode(hit, charges);
     }
 
     @EventListener
     public void event(PacketSendEvent event) {
-        if (!(event.getPacket() instanceof PlayerInteractBlockC2SPacket packet)
-                || getMc().player == null || getMc().world == null
-                || !getMc().player.getMainHandStack().isOf(Items.RESPAWN_ANCHOR)) return;
+        if (!(event.getPacket() instanceof PlayerInteractBlockC2SPacket packet)) return;
+        if (getMc().player == null || getMc().world == null) return;
+        if (!getMc().player.getMainHandStack().isOf(Items.RESPAWN_ANCHOR)) return;
 
         BlockHitResult hit = packet.getBlockHitResult();
-        BlockPos placedPos = getMc().world.getBlockState(hit.getBlockPos()).isReplaceable()
-                ? hit.getBlockPos() : hit.getBlockPos().offset(hit.getSide());
-        ownedAnchors.add(placedPos.toImmutable());
+        BlockPos clickedPos = hit.getBlockPos();
+        BlockState clickedState = getMc().world.getBlockState(clickedPos);
+        BlockPos placementPos = clickedState.isReplaceable() ? clickedPos : clickedPos.offset(hit.getSide());
+        pendingOwnedAnchors.add(placementPos.toImmutable());
     }
 
-    private void charge(BlockHitResult hit) {
+    private void charge(BlockHitResult hit, int currentCharges) {
+        if (!roll(placeChance)) return;
         if (!getMc().player.getMainHandStack().isOf(Items.GLOWSTONE)) {
-            if (!isTimerReadyForSwitch()) return;
-            Integer slot = InventoryUtil.INSTANCE.findItemInHotbar(Items.GLOWSTONE);
-            if (slot == null || !selectSlot(slot)) {
-                resetSwitchTimer();
+            if (!switchReady()) return;
+            if (!roll(switchChance)) {
+                resetSwitchClock();
                 return;
             }
-            resetSwitchTimer();
+            Integer slot = InventoryUtil.INSTANCE.findItemInHotbar(Items.GLOWSTONE);
+            if (slot == null) {
+                resetSwitchClock();
+                return;
+            }
+            selectSlot(slot);
+            resetSwitchClock();
         }
         if (!getMc().player.getMainHandStack().isOf(Items.GLOWSTONE)) return;
-        if (!isTimerReady(glowstoneClock, glowstoneDelay.getObject())) {
-            glowstoneClock++;
+        if (!glowstoneReady()) return;
+        if (!roll(glowstoneChance)) {
+            glowstoneClock = 0;
             return;
         }
         glowstoneClock = 0;
-        useAnchor(hit);
+        if (useAnchor(hit)) beginPendingAction(PendingAction.CHARGE, hit.getBlockPos(), currentCharges);
     }
 
-    private void explode(BlockHitResult hit) {
+    private void explode(BlockHitResult hit, int currentCharges) {
+        if (currentCharges <= 0) return;
         int slot = explodeSlot.getObject() - 1;
-        if (!isValidHotbarSlot(slot)) {
-            resetActiveCycle();
+        if (slot < 0 || slot > 8) {
+            resetCycle();
             return;
         }
         if (getMc().player.getInventory().selectedSlot != slot) {
-            if (!isTimerReadyForSwitch()) return;
-            if (!selectSlot(slot)) {
-                resetSwitchTimer();
+            if (!switchReady()) return;
+            if (!roll(switchChance)) {
+                resetSwitchClock();
                 return;
             }
-            resetSwitchTimer();
+            selectSlot(slot);
+            resetSwitchClock();
         }
         if (getMc().player.getInventory().selectedSlot != slot) return;
-        if (!isTimerReady(explodeClock, explodeDelay.getObject())) {
-            explodeClock++;
+        if (getMc().player.getMainHandStack().isOf(Items.GLOWSTONE)) {
+            resetCycle();
+            return;
+        }
+        if (!explodeReady()) return;
+        if (!roll(explodeChance)) {
+            explodeClock = 0;
             return;
         }
         explodeClock = 0;
-        useAnchor(hit);
-        ownedAnchors.remove(hit.getBlockPos());
-        armedAnchor = null;
+        if (useAnchor(hit)) beginPendingAction(PendingAction.EXPLODE, hit.getBlockPos(), currentCharges);
     }
 
-    private boolean hasValidGameState() {
+    private boolean useAnchor(BlockHitResult hit) {
+        if (!isCurrentAnchorHit(hit)) return false;
+        final ActionResult[] result = {ActionResult.PASS};
+        PojavPacketSafety.runTrustedBlockAction(() -> result[0] = getMc().interactionManager.interactBlock(getMc().player, Hand.MAIN_HAND, hit));
+        if (!result[0].isAccepted()) return false;
+        if (result[0].shouldSwingHand()) getMc().player.swingHand(Hand.MAIN_HAND);
+        return true;
+    }
+
+    private boolean isCurrentAnchorHit(BlockHitResult hit) {
+        if (hit == null || getMc().world == null) return false;
+        if (!(getMc().crosshairTarget instanceof BlockHitResult currentHit)) return false;
+        if (!currentHit.getBlockPos().equals(hit.getBlockPos())) return false;
+        return getMc().world.getBlockState(hit.getBlockPos()).isOf(Blocks.RESPAWN_ANCHOR);
+    }
+
+    private void beginPendingAction(PendingAction action, BlockPos pos, int charge) {
+        pendingAction = action;
+        pendingActionPos = pos.toImmutable();
+        pendingCharge = charge;
+    }
+
+    private void updatePendingAction() {
+        if (pendingAction == PendingAction.NONE || pendingActionPos == null) return;
+        BlockState state = getMc().world.getBlockState(pendingActionPos);
+        if (pendingAction == PendingAction.CHARGE) {
+            if (!state.isOf(Blocks.RESPAWN_ANCHOR)) {
+                resetPendingAction();
+                resetCycle();
+                return;
+            }
+            if (state.get(Properties.CHARGES) > pendingCharge) resetPendingAction();
+            return;
+        }
+        if (pendingAction == PendingAction.EXPLODE) {
+            if (!state.isOf(Blocks.RESPAWN_ANCHOR)) {
+                ownedAnchors.remove(pendingActionPos);
+                resetPendingAction();
+                resetCycle();
+                return;
+            }
+            if (state.get(Properties.CHARGES) != pendingCharge) {
+                resetPendingAction();
+                resetCycle();
+            }
+        }
+    }
+
+    private void confirmOwnedAnchors() {
+        Iterator<BlockPos> iterator = pendingOwnedAnchors.iterator();
+        while (iterator.hasNext()) {
+            BlockPos pos = iterator.next();
+            BlockState state = getMc().world.getBlockState(pos);
+            if (state.isOf(Blocks.RESPAWN_ANCHOR)) {
+                ownedAnchors.add(pos);
+                iterator.remove();
+                continue;
+            }
+            if (!(getMc().crosshairTarget instanceof BlockHitResult hit) || !hit.getBlockPos().equals(pos)) iterator.remove();
+        }
+    }
+
+    private boolean isPendingAt(BlockPos pos) {
+        return pendingAction != PendingAction.NONE && pendingActionPos != null && pendingActionPos.equals(pos);
+    }
+
+    private boolean isClientReady() {
         return getMc().player != null && getMc().world != null
                 && getMc().interactionManager != null && getMc().currentScreen == null;
     }
@@ -174,47 +273,90 @@ public final class AnchorMacro extends Module {
                 || PojavInput.isMousePressed(1);
     }
 
-    private boolean isTimerReadyForSwitch() {
-        if (switchClock >= switchDelay.getObject()) return true;
-        switchClock++;
-        return false;
+    private boolean canRunWhileUsing(boolean physicalUse) {
+        if (!physicalUse) return true;
+        boolean eatingOrShielding = getMc().player.getMainHandStack().contains(DataComponentTypes.FOOD)
+                || getMc().player.getMainHandStack().getItem() instanceof ShieldItem
+                || getMc().player.getOffHandStack().contains(DataComponentTypes.FOOD)
+                || getMc().player.getOffHandStack().getItem() instanceof ShieldItem;
+        return !eatingOrShielding || whileUse.getObject();
     }
 
-    private boolean isTimerReady(int clock, int configuredDelay) {
-        return clock >= configuredDelay;
+    private void arm(BlockPos pos) {
+        BlockPos immutable = pos.toImmutable();
+        if (!immutable.equals(armedAnchor)) {
+            resetPendingAction();
+            resetClocks();
+        }
+        armedAnchor = immutable;
     }
 
-    private boolean selectSlot(int slot) {
-        if (!isValidHotbarSlot(slot) || getMc().player == null) return false;
-        getMc().player.getInventory().selectedSlot = slot;
-        return getMc().player.getInventory().selectedSlot == slot;
+    private boolean isArmedFor(BlockPos pos, boolean physicalUse) {
+        return physicalUse || armedAnchor != null && armedAnchor.equals(pos);
     }
 
-    private boolean isValidHotbarSlot(int slot) {
-        return slot >= 0 && slot <= 8;
+    private boolean switchReady() {
+        int delay = switchDelay.getObject();
+        if (delay <= 0) return true;
+        if (switchClock < delay) {
+            switchClock++;
+            return false;
+        }
+        return true;
     }
 
-    private void useAnchor(BlockHitResult hit) {
-        if (!hasValidGameState() || hit == null) return;
-        if (!hit.getBlockPos().equals(armedAnchor) && !isPhysicalUsePressed()) return;
-        PojavPacketSafety.runTrustedBlockAction(() -> {
-            var result = getMc().interactionManager.interactBlock(getMc().player, Hand.MAIN_HAND, hit);
-            if (result.isAccepted() && result.shouldSwingHand()) getMc().player.swingHand(Hand.MAIN_HAND);
-        });
+    private boolean glowstoneReady() {
+        int delay = glowstoneDelay.getObject();
+        if (delay <= 0) return true;
+        if (glowstoneClock < delay) {
+            glowstoneClock++;
+            return false;
+        }
+        return true;
     }
 
-    private void resetTimers() {
+    private boolean explodeReady() {
+        int delay = explodeDelay.getObject();
+        if (delay <= 0) return true;
+        if (explodeClock < delay) {
+            explodeClock++;
+            return false;
+        }
+        return true;
+    }
+
+    private boolean roll(IntSetting chance) {
+        return RandomUtil.INSTANCE.randomInRange(1, 100) <= chance.getObject();
+    }
+
+    private void selectSlot(int slot) {
+        InventoryUtil.INSTANCE.setCurrentSlot(slot);
+    }
+
+    private void resetSwitchClock() {
+        switchClock = 0;
+    }
+
+    private void resetClocks() {
         switchClock = 0;
         glowstoneClock = 0;
         explodeClock = 0;
     }
 
-    private void resetSwitchTimer() {
-        switchClock = 0;
+    private void resetPendingAction() {
+        pendingAction = PendingAction.NONE;
+        pendingActionPos = null;
+        pendingCharge = 0;
     }
 
-    private void resetActiveCycle() {
+    private void resetCycle() {
         armedAnchor = null;
-        resetTimers();
+        resetPendingAction();
+    }
+
+    private enum PendingAction {
+        NONE,
+        CHARGE,
+        EXPLODE
     }
 }
