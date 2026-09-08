@@ -20,8 +20,8 @@ import net.minecraft.util.ActionResult;
 import net.minecraft.util.Hand;
 import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.hit.HitResult;
+import net.minecraft.util.math.BlockPos;
 
-/** Argon's direct Auto Hit Crystal sequence, adapted to Prestige's API. */
 public final class AutoHitCrystal extends Module {
     public BooleanSetting checkPlace;
     public IntSetting switchDelay;
@@ -32,12 +32,11 @@ public final class AutoHitCrystal extends Module {
     public BooleanSetting workWithCrystal;
     public BooleanSetting clickSimulation;
     public BooleanSetting swordSwap;
-
     private int placeClock;
     private int switchClock;
     private boolean active;
     private boolean crystalling;
-    private boolean crystalSelected;
+    private BlockPos activeBase;
 
     public AutoHitCrystal() {
         super("Auto Hit Crystal", Category.Combat, "Original Argon Auto Hit Crystal flow");
@@ -64,18 +63,15 @@ public final class AutoHitCrystal extends Module {
 
     @EventListener
     public void event(TickEvent event) {
-        if (getMc().player == null || getMc().world == null || getMc().interactionManager == null || getMc().currentScreen != null) return;
-
-        // Argon uses GLFW right mouse. Pojav's binding is fallback only.
-        if (!(PojavInput.isArgonMousePressed(1) || PojavInput.isMousePressed(1))) {
+        if (!hasValidGameState() || !isUsePressed()) {
             reset();
             return;
         }
-
-        if (getMc().crosshairTarget instanceof BlockHitResult hit
-                && !active
-                && checkPlace.getObject()
-                && !getMc().world.getBlockState(hit.getBlockPos()).isReplaceable()) return;
+        if (!(getMc().crosshairTarget instanceof BlockHitResult hit) || hit.getType() != HitResult.Type.BLOCK) {
+            reset();
+            return;
+        }
+        if (!active && checkPlace.getObject() && !getMc().world.getBlockState(hit.getBlockPos()).isReplaceable()) return;
 
         ItemStack mainHand = getMc().player.getMainHandStack();
         boolean permitted = mainHand.getItem() instanceof SwordItem
@@ -83,20 +79,26 @@ public final class AutoHitCrystal extends Module {
                 || workWithCrystal.getObject() && mainHand.isOf(Items.END_CRYSTAL);
         if (!permitted && !active) return;
 
-        if (!active && swordSwap.getObject() && getMc().crosshairTarget instanceof BlockHitResult hit) {
-            Block block = getMc().world.getBlockState(hit.getBlockPos()).getBlock();
-            crystalling = block == Blocks.OBSIDIAN || block == Blocks.BEDROCK;
+        if (!active) beginSequence(hit);
+        if (!isCurrentTargetValid(hit)) {
+            reset();
+            return;
         }
-        active = true;
-
-        if (!crystalling) placeObsidian();
+        if (!crystalling) placeObsidian(hit);
         if (crystalling) placeCrystal();
     }
 
-    private void placeObsidian() {
-        if (!(getMc().crosshairTarget instanceof BlockHitResult hit) || hit.getType() == HitResult.Type.MISS) return;
+    private void beginSequence(BlockHitResult hit) {
+        Block block = getMc().world.getBlockState(hit.getBlockPos()).getBlock();
+        crystalling = swordSwap.getObject() && (block == Blocks.OBSIDIAN || block == Blocks.BEDROCK);
+        activeBase = hit.getBlockPos().toImmutable();
+        active = true;
+    }
+
+    private void placeObsidian(BlockHitResult hit) {
         Block block = getMc().world.getBlockState(hit.getBlockPos()).getBlock();
         if (block == Blocks.OBSIDIAN || block == Blocks.BEDROCK) {
+            activeBase = hit.getBlockPos().toImmutable();
             crystalling = true;
             return;
         }
@@ -106,8 +108,10 @@ public final class AutoHitCrystal extends Module {
 
         getMc().options.useKey.setPressed(false);
         if (!holdOrSwap(Items.OBSIDIAN) || !consumePlaceClock() || !roll(placeChance)) return;
-        interact(hit);
+        ActionResult result = interact(hit);
+        if (!result.isAccepted()) return;
         placeClock = placeDelay.getObject();
+        activeBase = getPlacedBlockPosition(hit).toImmutable();
         crystalling = true;
     }
 
@@ -116,12 +120,11 @@ public final class AutoHitCrystal extends Module {
         if (!(getMc().crosshairTarget instanceof BlockHitResult hit) || hit.getType() != HitResult.Type.BLOCK) return;
         Block block = getMc().world.getBlockState(hit.getBlockPos()).getBlock();
         if (block != Blocks.OBSIDIAN && block != Blocks.BEDROCK) return;
-
-        // Argon's AutoCrystal onTick placement: same crosshair hit, normal
-        // client slot sync, no confirmation-state pause.
+        activeBase = hit.getBlockPos().toImmutable();
         getMc().options.useKey.setPressed(false);
-        interact(hit);
-        crystalSelected = true;
+        ActionResult result = interact(hit);
+        if (!result.isAccepted()) return;
+        reset();
     }
 
     private boolean holdOrSwap(Item item) {
@@ -132,9 +135,9 @@ public final class AutoHitCrystal extends Module {
         }
         if (!roll(switchChance)) return false;
         Integer slot = InventoryUtil.INSTANCE.findItemInHotbar(item);
-        if (slot == null) return false;
-        // Argon changes this locally; interactBlock performs the vanilla sync.
-        getMc().player.getInventory().selectedSlot = slot;
+        if (slot == null || slot < 0 || slot > 8) return false;
+        InventoryUtil.INSTANCE.setCurrentSlot(slot);
+        if (getMc().player.getInventory().selectedSlot != slot) return false;
         switchClock = switchDelay.getObject();
         return getMc().player.getMainHandStack().isOf(item);
     }
@@ -149,11 +152,35 @@ public final class AutoHitCrystal extends Module {
         return RandomUtil.INSTANCE.randomInRange(1, 100) <= chance.getObject();
     }
 
-    private void interact(BlockHitResult hit) {
-        PojavPacketSafety.runTrustedBlockAction(() -> {
-            ActionResult result = getMc().interactionManager.interactBlock(getMc().player, Hand.MAIN_HAND, hit);
-            if (result.isAccepted() && result.shouldSwingHand()) getMc().player.swingHand(Hand.MAIN_HAND);
-        });
+    private ActionResult interact(BlockHitResult hit) {
+        if (!hasValidGameState() || hit == null || hit.getType() != HitResult.Type.BLOCK) return ActionResult.FAIL;
+        final ActionResult[] result = {ActionResult.FAIL};
+        PojavPacketSafety.runTrustedBlockAction(() -> result[0] = getMc().interactionManager.interactBlock(getMc().player, Hand.MAIN_HAND, hit));
+        if (result[0].isAccepted() && result[0].shouldSwingHand()) getMc().player.swingHand(Hand.MAIN_HAND);
+        return result[0];
+    }
+
+    private boolean isCurrentTargetValid(BlockHitResult hit) {
+        if (activeBase == null) return false;
+        if (!crystalling) return true;
+        BlockPos currentPosition = hit.getBlockPos();
+        if (currentPosition.equals(activeBase)) return true;
+        Block currentBlock = getMc().world.getBlockState(currentPosition).getBlock();
+        return currentBlock == Blocks.OBSIDIAN || currentBlock == Blocks.BEDROCK;
+    }
+
+    private BlockPos getPlacedBlockPosition(BlockHitResult hit) {
+        if (getMc().world.getBlockState(hit.getBlockPos()).isReplaceable()) return hit.getBlockPos();
+        return hit.getBlockPos().offset(hit.getSide());
+    }
+
+    private boolean hasValidGameState() {
+        return getMc().player != null && getMc().world != null
+                && getMc().interactionManager != null && getMc().currentScreen == null;
+    }
+
+    private boolean isUsePressed() {
+        return PojavInput.isArgonMousePressed(1) || PojavInput.isMousePressed(1);
     }
 
     private void reset() {
@@ -161,6 +188,6 @@ public final class AutoHitCrystal extends Module {
         switchClock = switchDelay == null ? 0 : switchDelay.getObject();
         active = false;
         crystalling = false;
-        crystalSelected = false;
+        activeBase = null;
     }
 }
