@@ -1,6 +1,7 @@
 package dev.zprestige.prestige.api.mixin;
 
 import dev.zprestige.prestige.client.Prestige;
+import dev.zprestige.prestige.client.event.impl.PostTickEvent;
 import dev.zprestige.prestige.client.event.impl.ResolutionChangeEvent;
 import dev.zprestige.prestige.client.event.impl.RunEvent;
 import dev.zprestige.prestige.client.event.impl.TickEvent;
@@ -44,6 +45,18 @@ public class MixinMinecraft {
         if (new TickEvent().invoke()) {
             callbackInfo.cancel();
         }
+    }
+
+    @Inject(method={"tick"}, at={@At(value="TAIL")})
+    void postTick(CallbackInfo callbackInfo) {
+        if (Prestige.Companion.getSelfDestructed()) {
+            return;
+        }
+        MinecraftClient client = MinecraftClient.getInstance();
+        if (client.world == null || client.player == null) {
+            return;
+        }
+        new PostTickEvent().invoke();
     }
 
     @Inject(method={"getFramerateLimit"}, at={@At(value="RETURN")}, cancellable=true)
